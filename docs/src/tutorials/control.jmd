@@ -1,0 +1,294 @@
+# Control-system simulation and design
+
+This tutorial will demonstrate a typical workflow for design and simulation of a control system.
+We will start with a very basic feedback-control scheme, and iteratively add complexity until when have a control system that is well tuned for both regulation and servo performance.
+The steps we will follow are
+
+1. Define a controlled process
+2. Simulate open loop
+3. Design a PID controller
+4. Simulate closed loop
+5. Implement feedforward to shape the system's response to reference changes
+6. Linearize the system model
+7. Design an observer and state-feedback controller for the linearized process
+8. Design a model-based feedforward
+9. Discretize the controller
+10. Simulate the final system
+
+```
+TODO
+    Proposed interface changes are documented with a code block
+    Further topics to include may be
+    - Autotuning
+    - Distinguish controlled and measured outputs
+```
+
+## The system model
+We will consider a system consisting of two masses connected by a flexible element.
+This setup is very common when controlling things that move, where the first mass belongs to the controlled force or torque generating element (e.g., a motor) and the second mass belongs to the thing being moved, e.g., a printer head or a robot arm.
+The flexible element connecting the two masses may be the motor shaft, or a gas in a pneumatic system.
+
+The code belows defines the system model, which also includes a damper to model dissipation of energy by the flexible element. 
+
+```julia
+using ModelingToolkit, OrdinaryDiffEq, Plots
+@parameters t
+D = Differential(t)
+
+@parameters u(t) [input=true]  # Indicate that this is a controlled input
+@parameters y(t) [output=true] # Indicate that this is a measured output
+
+function Mass(; name, m = 1.0, p = 0, v = 0)
+    ps = @parameters m=m
+    sts = @variables pos(t)=p vel(t)=v
+    eqs = D(pos) ~ vel
+    ODESystem(eqs, t, [pos, vel], ps; name)
+end
+
+function Spring(; name, k = 1e4)
+    ps = @parameters k=k
+    @variables x(t)=0 # Spring deflection
+    ODESystem(Equation[], t, [x], ps; name)
+end
+
+function Damper(; name, c = 10)
+    ps = @parameters c=c
+    @variables vel(t)=0
+    ODESystem(Equation[], t, [vel], ps; name)
+end
+
+function SpringDamper(; name, k=false, c=false)
+    spring = Spring(; name=:spring, k)
+    damper = Damper(; name=:damper, c)
+    compose(
+        ODESystem(Equation[], t; name),
+        spring, damper)
+end
+
+
+connect_sd(sd, m1, m2) = [sd.spring.x ~ m1.pos - m2.pos, sd.damper.vel ~ m1.vel - m2.vel]
+sd_force(sd) = -sd.spring.k * sd.spring.x - sd.damper.c * sd.damper.vel
+
+# Parameters
+m1 = 1
+m2 = 1
+k = 1000
+c = 10
+
+@named mass1 = Mass(; m=m1)
+@named mass2 = Mass(; m=m2)
+@named sd = SpringDamper(; k, c)
+
+eqs = [
+    connect_sd(sd, mass1, mass2)
+    D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
+    D(mass2.vel) ~ (-sd_force(sd)) / mass2.m
+]
+@named _model = ODESystem(eqs, t; controls=[u], observed=[y~mass2.pos])
+@named model = compose(_model, mass1, mass2, sd);
+```
+We are now ready to simulate the system.
+We simulate the response of the system to a sinusoidal input and plot how the states evolve in time
+
+```
+INTERFACE NOTE
+    I do not know how to simulate with `u = sin(t)` where `u` is a `@parameters u(t) [input=true]`
+    I will therefore redefine the system equations in order to proceed. 
+```
+
+System redefinition with `sin(t)` input:
+```julia
+us = sin(30t)
+eqs2 = [
+    connect_sd(sd, mass1, mass2)
+    D(mass1.vel) ~ ( sd_force(sd) + us) / mass1.m
+    D(mass2.vel) ~ (-sd_force(sd)) / mass2.m
+]
+@named _model2 = ODESystem(eqs2, t; observed=[y~mass2.pos]) # controls removed here
+@named model2 = compose(_model2, mass1, mass2, sd)
+sys = structural_simplify(model2);
+```
+
+```julia
+prob = ODEProblem(sys, Pair[], (0., 1.))
+sol = solve(prob, Rosenbrock23())
+plot(sol)
+```
+We see that the second mass lags behind the first due to the flexible coupling.
+
+## Simple controller design
+### Feedback
+
+We now proceed to design a simple controller for the system that attempts to keep the position of the second mass at a reference position $r$.
+At this stage, the controller will be designed in simulated as a continuous-time system.
+The closed-loop system will look like this
+```
+           ┌─────────┐        ┌────────┐
+  r      e │         │    u   │        │
+───────+───►   PID   ├────────►   P    ├──┐
+      -│   │         │        │        │  │
+       │   └─────────┘        └────────┘  │
+       │                                  │
+       └──────────────────────────────────┘
+```
+The typical textbook version of a PID controller is *not proper* since it contains a pure derivative term.
+This is problematic for several reasons.
+1. It requires you to know the derivative of the input.
+2. The input may not be differentiable. Even if it is, the derivative may have excessive high-frequency contents.
+
+It is therefore common to include a low-pass filter in the PID controller, which we do below.
+```julia
+function PID(; kp=false, ki=false, kd=false, Tf, name)
+    @parameters t kp=kp ki=ki kd=kd Tf=Tf
+    @variables u(t)=0 e(t)=0 I(t)=0# 
+    @variables F(t)=0 dF(t)=0
+    ODESystem([
+            D(F) ~ dF # Filter state
+            D(I) ~ e  # Integral state
+            dF ~ (-F + e)/Tf # Lowpass filter
+            u ~ kp*e + ki*I + kd*dF # PID controller with filtered derivative
+        ], t; name)
+end
+
+@named pid = PID(kp=10, ki=0.1, kd=0.1, Tf=0.01)
+@parameters r(t) [input=true] # reference signal
+
+closed_loop_eqs = [
+    pid.e ~ r - model.y # controller error
+    model.u ~ pid.u # connect output of controller with input of system
+]
+```
+
+```
+INTERFACE NOTE 
+    The code above does not work, the output `model.y` is an equation rather than something that behaves like a state.
+    I would like to be able to say that the control error as observed by the PID controller is $r - y$.
+    Below, I redefine the system in order to progress.
+    I would also like to add a load disturbance to the dynamics equation of the second mass,
+    I cannot find a way to do this other than to redefine the system model (the block diagram editor will make this straightforward). 
+```
+
+We simulate the system with a slow sinusoidal reference $r$, and a load disturbance $d$ acting on the second mass at $t=10$.
+```julia
+@variables u(t)
+r = sin(t)
+d = 2(t >= 10)
+
+eqs = [
+    connect_sd(sd, mass1, mass2)
+    D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
+    D(mass2.vel) ~ (-sd_force(sd) + d) / mass2.m # add load disturbance d
+]
+@named _model = ODESystem(eqs, t; observed=[y~mass2.pos])
+@named model = compose(_model, mass1, mass2, sd)
+
+closed_loop_eqs = [
+    pid.e ~ r - model.mass2.pos # controller error
+    model.u ~ pid.u # connect output of controller with input of system
+]
+
+@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model])
+closed_loop = dae_index_lowering(closed_loop)
+closed_loop = structural_simplify(closed_loop)
+prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
+sol = solve(prob, Rosenbrock23())
+plot(plot(sol, vars=[r, model.mass2.pos, pid.e]), plot(sol, vars=[pid.u]))
+```
+
+The controller does an okay job at making the position of the second mass track the reference, but does a rather poor job rejecting the load disturbance that enters the system at $t=10$.
+Try experimenting with the PID parameters to improve the disturbance rejection.
+
+### Feedforward
+
+Control design for [servo systems](https://en.wikipedia.org/wiki/Servomechanism) is commonly split up into two subproblems, feedback control and feedforward control.
+The feedback controller is designed to reject disturbances, such as an external force perturbing one of the masses in our example.
+Feedforward control can be seen as a modification of the reference signal to shape the system's response to reference changes. 
+
+Let's say that we want the system to respond well to step changes in the reference value.
+```
+INTERFACE NOTE 
+    Here I need to redefine the system equations to simulate a new kind of input.
+    It would be nice if one could do this by simply providing a new function as the input, like `closed_loop.r => (t > 1)`, to the `ODEProblem` constructor.
+    Ideally I would also like to disconnect the load disturbance I added above, this would be accomplished in exactly the same manner. 
+```
+```julia
+r = t >= 1
+closed_loop_eqs = [
+    pid.e ~ r - model.mass2.pos # controller error
+    model.u ~ pid.u # connect output of controller with input of system
+]
+
+@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model])
+closed_loop = dae_index_lowering(closed_loop)
+closed_loop = structural_simplify(closed_loop)
+prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
+sol = solve(prob, Rosenbrock23())
+plot(sol, size=(800,600), vars=[model.mass2.pos, pid.e])
+```
+
+We see that the system response is quite fast, but with a large overshoot and lots of oscillations when we make a sudden step in the reference.
+To mitigate this problem, we could either detune the controller and slow it down, or we could shape the reference to remove high frequency contents.
+We will go with the second approach here and create a feedforward filter. 
+
+```julia
+function lowpass(; Tf, name)
+    @parameters t Tf=Tf
+    @variables x(t)=0 u(t)
+    ODESystem([
+            D(x) ~ (-x + u)/Tf
+        ], t; name)
+end
+
+@named lpf = lowpass(Tf = 0.1)
+
+closed_loop_eqs = [
+    lpf.u ~ r # connect the reference to the filter
+    pid.e ~ lpf.x - model.mass2.pos # controller error
+    model.u ~ pid.u # connect output of controller with input of system
+]
+
+@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model, lpf])
+closed_loop = dae_index_lowering(closed_loop)
+closed_loop = structural_simplify(closed_loop)
+prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1.0, pid.kd => 20, lpf.Tf=>0.1])
+sol = solve(prob, Rosenbrock23())
+plot(sol, size=(800,600), vars=[model.mass2.pos, pid.e, lpf.x])
+```
+With some slight tuning of the lowpass filter and the PID parameters, we obtain a reasonable step response.
+The price we payed in shaping the reference in this primitive manner is that the step response got a bit slower, something we will address in the next section. 
+
+## Model-based design
+So far we have been rather undiciplined in our controller tuning, and for simple system, manually tuning the controller parameters may actually be an okay approach. However, a more systematic approach is to derive a representation of the system model as a linear state-space model or a transfer function. Since the dynamics in the example is linear, we do not actually lose any fidelity in this case. 
+
+### Linearization
+The system model can be written on the form
+$$
+\begin{align}
+\dot x &= Ax + Bu\\
+y &= Cx + Du
+\end{align}
+$$
+where $y$ contains measurable outputs and $u$ are the control inputs. The matrices $A,B,C,D$ can be obtained with the functions
+- `A`: `calculate_jacobian`
+- `B`: `calculate_control_jacobian`
+- `C`: `calculate_output_jacobian` (this does not exist)
+- `D`: `calculate_control_output_jacobian` (this does not exist)
+
+```
+INTERFACE NOTE
+    It would perhaps be nice if one could write something akin to 
+    `C = jacobian(outputs(sys), controls(sys))` instead of having separate functions?
+    A function which returns all four matrices would also be convenient.
+```
+
+With such a linearized system at hand, we may use any and all of the classical control-system tools from, e.g., [ControlSystems.jl](https://github.com/JuliaControl/ControlSystems.jl).
+
+### Observer design
+`kalman`
+### State-feedback design
+`lqr`
+### Feedforward design
+Inverse
+
+## Discretization
+`c2d` or simple `exp` followed by creation of a `DiscreteSystem`.
