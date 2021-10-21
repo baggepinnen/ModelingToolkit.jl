@@ -224,7 +224,7 @@ closed_loop = dae_index_lowering(closed_loop)
 closed_loop = structural_simplify(closed_loop)
 prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
 sol = solve(prob, Rosenbrock23())
-plot(sol, size=(800,600), vars=[3.mass2.pos, pid.e])
+plot(sol, size=(800,600), vars=[model3.mass2.pos, pid.e])
 ```
 
 We see that the system response is quite fast, but with a large overshoot and lots of oscillations when we make a sudden step in the reference.
@@ -293,12 +293,33 @@ bodeplot(G)
 
 With such a linearized system at hand, we may use any and all of the classical control-system tools from, e.g., [ControlSystems.jl](https://github.com/JuliaControl/ControlSystems.jl).
 
-### Observer design
-`kalman`
-### State-feedback design
-`lqr`
+### LQG design
+Using [RobustAndOptimalControl.jl](https://github.com/JuliaControl/RobustAndOptimalControl.jl) we may design a model-based LQG controller for the plant `G`, to do this, we must specify the cost matrices for the LQR control problem and the covariance matrices for the dynamics and measurement noise.
+```julia
+using ControlSystems, RobustAndOptimalControl
+G = ssrand(1, 1, 4, proper=true) # a random system for now
+Q1 = I(G.nx) # state penalty
+Q2 = I(G.nu) # control penalty
+R1 = I(G.nx) # state noise covariance
+R2 = I(G.ny) # measurement noise covariance
+
+lqg = LQGProblem(G, Q1, Q2, R1, R2)
+gangoffourplot(lqg)
+```
+The a Kalman-filter based controller that takes in measurements and produces a command input  can be obtained from the `lqg` structure by
+```julia
+Clqg = observer_controller(lqg)
+```
 ### Feedforward design
-Inverse
+We previously employed a simple lowpass filter to shape the reference in order to get a desired response to set-point changes. In this section, we will instead make use of an inverse model of the system. Ideally, we would like the output to follow the reference exactly, i.e., we want the closed lop to have the transfer function 1. This goal is often not realistic, and we are usually happy if the transfer function is approximately one up to a certain frequency, called the closed-loop bandwidth. How well we achieved this with the control design above is shown in the figure with 4 Bode diagrams, the diagram labelled $T$ shows the closed-loop transfer function from the reference signal to the measured output. The bandwidth appears to be approximately one up to 1rad/s, after which it rolls off and we can no longer follow references changing with higher frequencies. If we try to increase the closed-loop bandwidth, we may increase noise amplification and get a less robust closed loop. 
+
+By making use of an *inverse* model in the feedforward path, we may increase the bandwidth between the reference input and the output, without affecting the closed-loop properties. Intuitively, the inverse model "cancels" the effect of the plant $P$, producing The combined system $P P^{-1} = I$. In practice, making use of a true model inverse often requires knowledge of derivatives of the input signal (since the plant is of integrating nature), and we must thus resort to an approximate inverse. The approximation we use is to first lowpass filter the reference with a filter of sufficiently high order such that ModelingToolkit can figure out the derivatives of the filtered reference signal from the filter states. 
+
+The inverse of an `ODESystem` is obtained with `inv(sys)`
+```
+NOTE
+    The paragraph above contains wishful thinking, there is no `inv(::ODESystem)` yet.
+```
 
 ## Discretization
 `c2d` or simple `exp` followed by creation of a `DiscreteSystem`.
