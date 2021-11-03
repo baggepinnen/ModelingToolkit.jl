@@ -7,6 +7,9 @@ D = Differential(tv)
 @named sys = ODESystem([D(x) ~ -x + u], tv) # both u and x are unbound
 @named sys2 = ODESystem([D(x) ~ -sys.x], tv, systems=[sys]) # this binds sys.x in the context of sys2, sys2.x is still unbound
 @named sys3 = ODESystem([D(x) ~ -sys.x + sys.u], tv, systems=[sys]) # This binds both sys.x and sys.u
+
+@named sys4 = ODESystem([D(x) ~ -sys.x, u~sys.u], tv, systems=[sys]) # This binds both sys.x and sys3.u, this system is one layer deeper than the previous. u is directly forwarded to sys.u, and in this case sys.u is bound while u is not
+
 @test has_var(x ~ 1, x)
 @test has_var(1 ~ x, x)
 @test has_var(x + x, x)
@@ -26,6 +29,9 @@ D = Differential(tv)
 
 @test is_bound(sys3, sys.u) # I would like to write sys3.sys.u here but that's not how the variable is stored in the equations
 @test is_bound(sys3, sys.x)
+
+@test  is_bound(sys4, sys.u)
+@test !is_bound(sys4, u)
 
 @test isequal(inputs(sys), [u])
 @test isequal(inputs(sys2), [sys.u])
