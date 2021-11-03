@@ -83,7 +83,7 @@ function is_bound(sys, u, stack=[])
     eqs = filter(eq->has_var(eq, u), eqs) # Only look at equations that contain u
     # isout = isoutput(u)
     for eq in eqs
-        vars = [get_variables(eq.rhs); get_variables(eq.lhs)]
+        vars = get_equationvars(eq)
         for var in vars
             var === u && continue
             if !same_or_inner_namespace(u, var)
@@ -95,7 +95,7 @@ function is_bound(sys, u, stack=[])
     oeqs = observed(sys)
     oeqs = filter(eq->has_var(eq, u), oeqs) # Only look at equations that contain u
     for eq in oeqs
-        vars = [get_variables(eq.rhs); get_variables(eq.lhs)]
+        vars = get_equationvars(eq)
         for var in vars
             var === u && continue
             if !same_or_inner_namespace(u, var)
@@ -108,8 +108,6 @@ function is_bound(sys, u, stack=[])
     end
     false
 end
-
-
 
 """
     same_or_inner_namespace(u, var)
@@ -158,3 +156,90 @@ end
 
 has_var(ex, x) = x ∈ Set(get_variables(ex))
 
+get_equationvars(eq) = [get_variables(eq.rhs); get_variables(eq.lhs)]
+
+"""
+    linearize(sys::ODESystem; numeric=false, x0=nothing)
+
+Linaerize `sys` around operating point `x0`. `x0` can be `nothing` for a symbolic linearization, or a `Dict` that maps states and parameters to values.
+
+Returns a named tuple with fields `A,B,x,u`
+representing a linear state-space system
+```
+ẋ = Ax + Bu
+```
+
+If `numeric = true`, symbolics parameters are replaced with their default values and the matrices `A,B` will have element type `Float64`, only pass this option if all parameters and states have default values or have values in `x0`.
+"""
+function linearize(sys::ODESystem; x0=nothing, u = unbound_inputs(sys), y = unbound_outputs(sys), numeric=false)
+    sysr = inconsistent_simplification(sys; simplify=false)
+    x = differential_states(sysr)
+    # Set(x) == Set(states(sysr)) || error("Algebraic variables remaining, this is currently not supported in linearize.")
+    dynamics = [e.rhs for e in equations(sysr) if isdifferential(e.lhs)]
+    oexprs = output_expressions(sysr, y)
+    A = Symbolics.jacobian(dynamics, x)
+    B = Symbolics.jacobian(dynamics, u) 
+    C = Symbolics.jacobian(oexprs, x) 
+    D = Symbolics.jacobian(oexprs, u) 
+
+    if numeric || x0 !== nothing
+        sym2val = ModelingToolkit.defaults(sysr)
+        if x0 isa AbstractDict
+            sym2val = merge(sym2val, x0) # NOTE: it's important to have x0 last for x0 to take precedence
+        end
+        A,B,C,D = numeric_linearization(A, B, C, D, sym2val)
+    end
+    @assert size(A,1) == size(A,2) == length(x)
+    @assert size(A,1) == size(B,1)
+    @assert size(B,2) == length(u)
+    @assert size(C) == (length(y), length(x))
+    @assert size(D) == (length(y), length(u))
+    # x = states(sysr, states(sysr)) # redo this to get the namespace right for later use
+    # u = filter(isinput, x)
+    # x = filter(!isinput, x)
+    (; A, B, C, D, x, u)
+end
+
+function inconsistent_simplification(sys; simplify=false)
+    sysr = initialize_system_structure(alias_elimination(sys))
+    if sysr isa ODESystem
+        sys = dae_index_lowering(sysr)
+    end
+    sysr = tearing(sys, simplify=simplify)
+end
+
+function numeric_linearization(A, B, C, D, sym2val)
+    function tofloat(x)
+        xv = value(x)
+        xv isa Real || error("There were symbolic variables remaining after substitution. This means that `sym2val` did not contain a map for all relevant values. If you called linearize, make sure that there are either defaults for all relevant parameters and states, or that those parameters and states that lack defaults are provided in the argument `x0`. The problematic expression is $(xv)")
+        Float64(xv)
+    end
+    A = substitute.(A, Ref(sym2val)) .|> tofloat
+    B = substitute.(B, Ref(sym2val)) .|> tofloat
+    C = substitute.(C, Ref(sym2val)) .|> tofloat
+    D = substitute.(D, Ref(sym2val)) .|> tofloat
+    (; A, B, C, D)
+end
+
+function differential_states(sys)
+    diffvars = Set([e.lhs.arguments[] for e in equations(sys) if isdifferential(e.lhs)])
+    x = [map(eq->eq.lhs, observed(sys)); states(sys)]
+
+    filter(x->x ∈ diffvars, x)
+end
+
+function output_expressions(sysr, ys)
+    sety = Set(ys)
+    oexprs = Num[]
+    eqs = [observed(sysr); equations(sysr)]
+    for eq in eqs
+        vars = get_equationvars(eq)
+        numys = count(v->v ∈ sety, vars)
+        numys == 0 && continue
+        numys > 1 && error("Found more than one linearization output in the same equation.")
+        y = vars[findfirst(v->v ∈ sety, vars)] # The particular output variable in this eq
+        ex = Symbolics.solve_for(eq, y) # get the expression equalling y
+        push!(oexprs, ex)
+    end
+    oexprs
+end
