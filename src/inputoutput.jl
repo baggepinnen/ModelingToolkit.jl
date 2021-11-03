@@ -70,12 +70,18 @@ function is_bound(sys, u)
         vars = [get_variables(eq.rhs); get_variables(eq.lhs)]
         for var in vars
             var === u && continue
-            if get_namespace(u) != get_namespace(var)
+            if !same_or_inner_namespace(u, var)
                 return true
             end
         end
     end
     false
+end
+
+function same_or_inner_namespace(u, var)
+    nu = get_namespace(u)
+    nv = get_namespace(var)
+    nu == nv || startswith(nv, nu) # namespaces are the same, or nv starts with nu, i.e., nv is an inner namepsace to nu
 end
 
 """
