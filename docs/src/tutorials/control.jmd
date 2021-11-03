@@ -99,14 +99,17 @@ INTERFACE NOTE
 
 System redefinition with `sin(t)` input:
 ```julia
+function Model(u, d=0)
+    eqs = [
+        connect_sd(sd, mass1, mass2)
+        D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
+        D(mass2.vel) ~ (-sd_force(sd) + d) / mass2.m
+    ]
+    @named _model = ODESystem(eqs, t; observed=[y~mass2.pos]) # controls removed here
+    @named model = compose(_model, mass1, mass2, sd)
+end
 us = sin(30t)
-eqs2 = [
-    connect_sd(sd, mass1, mass2)
-    D(mass1.vel) ~ ( sd_force(sd) + us) / mass1.m
-    D(mass2.vel) ~ (-sd_force(sd)) / mass2.m
-]
-@named _model2 = ODESystem(eqs2, t; observed=[y~mass2.pos]) # controls removed here
-@named model2 = compose(_model2, mass1, mass2, sd)
+model2 = Model(us)
 sys = structural_simplify(model2);
 ```
 
@@ -171,29 +174,25 @@ INTERFACE NOTE
 
 We simulate the system with a slow sinusoidal reference $r$, and a load disturbance $d$ acting on the second mass at $t=10$.
 ```julia
-@variables u(t)
 r = sin(t)
 d = 2(t >= 10)
-
-eqs = [
-    connect_sd(sd, mass1, mass2)
-    D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
-    D(mass2.vel) ~ (-sd_force(sd) + d) / mass2.m # add load disturbance d
-]
-@named _model3 = ODESystem(eqs, t; observed=[y~mass2.pos])
-@named model3 = compose(_model3, mass1, mass2, sd)
-
-closed_loop_eqs = [
-    pid.e ~ r - model3.mass2.pos # controller error
-    model3.u ~ pid.u # connect output of controller with input of system
-]
-
-@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model3])
+function ClosedLoop(controller, d=0, rin=0; systems=[])
+    @variables u(t) r(t)
+    m = Model(u, d)
+    closed_loop_eqs = [
+        controller.e ~ r - m.mass2.pos # controller error
+        r ~ rin
+        m.u ~ controller.u # connect output of controller with input of system
+    ]
+    @named closed_loop = ODESystem(closed_loop_eqs, t, systems=[controller; m; systems])
+    # compose(closed_loop, controller, m)
+end
+closed_loop = ClosedLoop(pid, d, r)
 closed_loop = dae_index_lowering(closed_loop)
 closed_loop = structural_simplify(closed_loop)
 prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
 sol = solve(prob, Rosenbrock23())
-plot(plot(sol, vars=[r, model3.mass2.pos, pid.e]), plot(sol, vars=[pid.u]))
+plot(plot(sol, vars=[r, model.mass2₊pos, pid.e]), plot(sol, vars=[pid.u]))
 ```
 
 The controller does an okay job at making the position of the second mass track the reference, but does a rather poor job rejecting the load disturbance that enters the system at $t=10$.
@@ -214,17 +213,12 @@ INTERFACE NOTE
 ```
 ```julia
 r = t >= 1
-closed_loop_eqs = [
-    pid.e ~ r - model3.mass2.pos # controller error
-    model3.u ~ pid.u # connect output of controller with input of system
-]
-
-@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model3])
+closed_loop = ClosedLoop(pid, d, r)
 closed_loop = dae_index_lowering(closed_loop)
 closed_loop = structural_simplify(closed_loop)
 prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
 sol = solve(prob, Rosenbrock23())
-plot(sol, size=(800,600), vars=[model3.mass2.pos, pid.e])
+plot(sol, size=(800,600), vars=[model.mass2₊pos, pid.e])
 ```
 
 We see that the system response is quite fast, but with a large overshoot and lots of oscillations when we make a sudden step in the reference.
@@ -242,19 +236,22 @@ end
 
 @named lpf = lowpass(Tf = 0.1)
 
-closed_loop_eqs = [
+@variables xr(t) # This workaround is due to https://github.com/SciML/ModelingToolkit.jl/issues/1309
+closed_loop0 = ClosedLoop(pid, d, lpf.x, systems=[])
+@error "There is a namespacing issue here that appears hopeless to solve. Pick this up when input/output semantics are in place."
+filter_eqs = [
     lpf.u ~ r # connect the reference to the filter
-    pid.e ~ lpf.x - model3.mass2.pos # controller error
-    model3.u ~ pid.u # connect output of controller with input of system
+    lpf.x ~ closed_loop0.r # I really wish I didn't need this equation, it's required since I can't figure out how to make this binding inside `ClosedLoop` due to namespacing issues
 ]
 
-@named closed_loop = ODESystem(closed_loop_eqs, t, systems=[pid, model3, lpf])
-closed_loop = dae_index_lowering(closed_loop)
-closed_loop = structural_simplify(closed_loop)
-prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1.0, pid.kd => 20, lpf.Tf=>0.1])
+@named closed_loop2 = ODESystem(filter_eqs, t, systems=[closed_loop0, lpf])
+# closed_loop = dae_index_lowering(closed_loop)
+closed_loop2 = structural_simplify(closed_loop2)
+prob = ODEProblem(closed_loop2, Pair[], (0., 20.), Pair[closed_loop0.pid.kp => 1, closed_loop0.pid.ki => 1.0, closed_loop0.pid.kd => 20, lpf.Tf=>0.1])
 sol = solve(prob, Rosenbrock23())
-plot(sol, size=(800,600), vars=[model3.mass2.pos, pid.e, lpf.x])
+plot(sol, size=(800,600), vars=[closed_loop.model₊mass2₊pos, closed_loop.pid₊e, lpf.x])
 ```
+
 With some slight tuning of the lowpass filter and the PID parameters, we obtain a reasonable step response.
 The price we payed in shaping the reference in this primitive manner is that the step response got a bit slower, something we will address in the next section. 
 
