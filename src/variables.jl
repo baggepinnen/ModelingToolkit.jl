@@ -11,6 +11,7 @@ Symbolics.option_to_metadata_type(::Val{:description}) = VariableDescriptionType
 Symbolics.option_to_metadata_type(::Val{:input}) = VariableInput
 Symbolics.option_to_metadata_type(::Val{:output}) = VariableOutput
 
+isvarkind(m, x::Num) = isvarkind(m, value(x))
 function isvarkind(m, x)
     p = getparent(x, nothing)
     p === nothing || (x = p)
