@@ -5,10 +5,7 @@ using Symbolics: get_variables
 Return all variables that mare marked as inputs. See also [`unbound_inputs`](@ref)
 See also [`bound_inputs`](@ref), [`unbound_inputs`](@ref)
 """
-function inputs(sys)
-    x = states(sys)
-    filter(isinput, x)
-end
+inputs(sys) = filter(isinput, states(sys))
 
 """
     outputs(sys)
@@ -16,10 +13,7 @@ end
 Return all variables that mare marked as outputs. See also [`unbound_outputs`](@ref)
 See also [`bound_outputs`](@ref), [`unbound_outputs`](@ref)
 """
-function outputs(sys)
-    x = states(sys)
-    filter(isoutput, x)
-end
+outputs(sys) = filter(isoutput, states(sys))
 
 """
     bound_inputs(sys)
