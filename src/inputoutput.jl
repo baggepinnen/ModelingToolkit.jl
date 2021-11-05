@@ -83,7 +83,7 @@ function is_bound(sys, u, stack=[])
     eqs = filter(eq->has_var(eq, u), eqs) # Only look at equations that contain u
     # isout = isoutput(u)
     for eq in eqs
-        vars = [get_variables(eq.rhs); get_variables(eq.lhs)]
+        vars = get_equationvars(eq)
         for var in vars
             var === u && continue
             if !same_or_inner_namespace(u, var)
@@ -95,7 +95,7 @@ function is_bound(sys, u, stack=[])
     oeqs = observed(sys)
     oeqs = filter(eq->has_var(eq, u), oeqs) # Only look at equations that contain u
     for eq in oeqs
-        vars = [get_variables(eq.rhs); get_variables(eq.lhs)]
+        vars = get_equationvars(eq)
         for var in vars
             var === u && continue
             if !same_or_inner_namespace(u, var)
@@ -108,8 +108,6 @@ function is_bound(sys, u, stack=[])
     end
     false
 end
-
-
 
 """
     same_or_inner_namespace(u, var)
@@ -158,3 +156,4 @@ end
 
 has_var(ex, x) = x ∈ Set(get_variables(ex))
 
+get_equationvars(eq) = [get_variables(eq.rhs); get_variables(eq.lhs)]

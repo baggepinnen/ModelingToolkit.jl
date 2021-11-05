@@ -83,3 +83,82 @@ syss = structural_simplify(sys2)
 
 @test isequal(unbound_outputs(syss), [y])
 @test isequal(bound_outputs(syss), [sys.y])
+
+# Test linearize and related utilities
+using ModelingToolkit: linearize, numeric_linearization, differential_states, output_expressions, isdifferential
+@parameters tv
+D = Differential(tv)
+@variables x(tv) u(tv) [input=true] y(tv) [output=true]
+@named sys = ODESystem([D(x) ~ -x + 2u, y ~ 3x + 4u], tv) # both y and x are unbound
+sysr = ModelingToolkit.inconsistent_simplification(sys)
+@test isequal(differential_states(sysr), [x])
+
+ys = unbound_outputs(sysr)
+us = unbound_inputs(sysr)
+
+@test isequal(output_expressions(sysr, ys)[], 3x+4u)
+
+lin = ModelingToolkit.linearize(sys)
+@test isequal(lin.A, -1ones(1,1))
+@test isequal(lin.B, 2ones(1,1))
+@test isequal(lin.C, 3ones(1,1))
+@test isequal(lin.D, 4ones(1,1))
+@test eltype(lin.A) <: Num
+
+lin = ModelingToolkit.linearize(sys, numeric=true)
+@test isequal(lin.A, -1ones(1,1))
+@test isequal(lin.B, 2ones(1,1))
+@test isequal(lin.C, 3ones(1,1))
+@test isequal(lin.D, 4ones(1,1))
+@test eltype(lin.A) <: Float64
+
+
+@named sys = ODESystem([D(x) ~ -x + u, y ~ 2x], tv) 
+@named sys2 = ODESystem([D(x) ~ -sys.x^2 + x, y ~ sys.y], tv, systems=[sys]) 
+@test_throws ErrorException ModelingToolkit.linearize(sys2, numeric=true)
+
+lin = ModelingToolkit.linearize(sys2)
+slA = Set(lin.A)
+# permutation invariant tests of the contents of A
+@test -1 ∈ slA
+@test -2sys.x ∈ slA
+@test 1 ∈ slA
+@test 0 ∈ slA
+
+## Array variables
+# NOTE: this fails with an assertion error, the problem is https://github.com/JuliaSymbolics/Symbolics.jl/issues/425
+
+# A = [0 1; 0 0]
+# B = [0, 1]
+# C = [1 0]
+# D = 0
+
+# nx = size(A,1)
+# nu = size(B,2)
+# ny = size(C,1)
+
+# x0 = [3,4]
+# @variables x[1:nx](tv)=x0 u[1:nu](tv)=0 [input=true] y[1:ny](tv)=C*x0 [output=true]
+# x = collect(x) # https://github.com/JuliaSymbolics/Symbolics.jl/issues/379
+# u = collect(u)
+# y = collect(y)
+# eqs = [
+#     Differential(tv).(x) .~ A*x .+ B*u
+#     y      .~ C*x .+ D*u
+# ]
+# @named sys = ODESystem(eqs, tv)
+
+
+# sysr = ModelingToolkit.inconsistent_simplification(sys)
+# @test isequal(differential_states(sysr), x)
+# ys = unbound_outputs(sysr)
+# us = unbound_inputs(sysr)
+# @test isequal(output_expressions(sysr, ys)[], x[1])
+
+# lin = ModelingToolkit.linearize(sys)
+# # u = unbound_inputs(sys); y = unbound_outputs(sys)
+# # NOTE: the tests below are written without assuming the resulting order of the states
+# @test count(!iszero, lin.A) == 1
+# @test lin.A[1,1] == 0
+# @test lin.A[2,2] == 0
+# @test isempty(setdiff(lin.B, [1,0]))
