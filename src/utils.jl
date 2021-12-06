@@ -272,6 +272,7 @@ v == Set([D(y), u])
 ```
 """
 vars(x::Sym; op=Differential) = Set([x])
+vars(x::Num; op=Differential) = vars(unwrap(x); op)
 vars(exprs::Symbolic; op=Differential) = vars([exprs]; op=op)
 vars(exprs; op=Differential) = foldl((x, y) -> vars!(x, y; op=op), exprs; init = Set())
 vars(eq::Equation; op=Differential) = vars!(Set(), eq; op=op)
