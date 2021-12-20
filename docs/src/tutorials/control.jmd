@@ -35,8 +35,8 @@ using ModelingToolkit, OrdinaryDiffEq, Plots
 @parameters t
 D = Differential(t)
 
-@parameters u(t) [input=true]  # Indicate that this is a controlled input
-@parameters y(t) [output=true] # Indicate that this is a measured output
+@variables u(t) [input=true]  # Indicate that this is a controlled input
+@variables y(t) [output=true] # Indicate that this is a measured output
 
 function Mass(; name, m = 1.0, p = 0, v = 0)
     ps = @parameters m=m
@@ -83,10 +83,10 @@ eqs = [
     connect_sd(sd, mass1, mass2)
     D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
     D(mass2.vel) ~ (-sd_force(sd)) / mass2.m
+    y~mass1.pos
 ]
-@named _model = ODESystem(eqs, t; controls=[u], observed=[y~mass1.pos])
+@named _model = ODESystem(eqs, t)
 @named model = compose(_model, mass1, mass2, sd);
-model = structural_simplify(model)
 ```
 We are now ready to simulate the system.
 We simulate the response of the system to a sinusoidal input and plot how the states evolve in time
@@ -104,8 +104,9 @@ function Model(u, d=0)
         connect_sd(sd, mass1, mass2)
         D(mass1.vel) ~ ( sd_force(sd) + u) / mass1.m
         D(mass2.vel) ~ (-sd_force(sd) + d) / mass2.m
+        y~mass2.pos
     ]
-    @named _model = ODESystem(eqs, t; observed=[y~mass2.pos]) # controls removed here
+    @named _model = ODESystem(eqs, t) # controls removed here
     @named model = compose(_model, mass1, mass2, sd)
 end
 us = sin(30t)
@@ -165,9 +166,6 @@ closed_loop_eqs = [
 
 ```
 INTERFACE NOTE 
-    The code above does not work, the output `model.y` is an equation rather than something that behaves like a state.
-    I would like to be able to say that the control error as observed by the PID controller is $r - y$.
-    Below, I redefine the system in order to progress.
     I would also like to add a load disturbance to the dynamics equation of the second mass,
     I cannot find a way to do this other than to redefine the system model (the block diagram editor will make this straightforward). 
 ```
@@ -188,7 +186,6 @@ function ClosedLoop(controller, d=0, rin=0; systems=[])
     # compose(closed_loop, controller, m)
 end
 closed_loop = ClosedLoop(pid, d, r)
-closed_loop = dae_index_lowering(closed_loop)
 closed_loop = structural_simplify(closed_loop)
 prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
 sol = solve(prob, Rosenbrock23())
@@ -214,7 +211,6 @@ INTERFACE NOTE
 ```julia
 r = t >= 1
 closed_loop = ClosedLoop(pid, d, r)
-closed_loop = dae_index_lowering(closed_loop)
 closed_loop = structural_simplify(closed_loop)
 prob = ODEProblem(closed_loop, Pair[], (0., 20.), Pair[pid.kp => 1, pid.ki => 1, pid.kd => 20, pid.Tf => 0.01])
 sol = solve(prob, Rosenbrock23())
@@ -236,16 +232,13 @@ end
 
 @named lpf = lowpass(Tf = 0.1)
 
-@variables xr(t) # This workaround is due to https://github.com/SciML/ModelingToolkit.jl/issues/1309
 closed_loop0 = ClosedLoop(pid, d, lpf.x, systems=[])
-@error "There is a namespacing issue here that appears hopeless to solve. Pick this up when input/output semantics are in place."
 filter_eqs = [
     lpf.u ~ r # connect the reference to the filter
-    lpf.x ~ closed_loop0.r # I really wish I didn't need this equation, it's required since I can't figure out how to make this binding inside `ClosedLoop` due to namespacing issues
+    lpf.x ~ closed_loop0.r 
 ]
 
 @named closed_loop2 = ODESystem(filter_eqs, t, systems=[closed_loop0, lpf])
-# closed_loop = dae_index_lowering(closed_loop)
 closed_loop2 = structural_simplify(closed_loop2)
 prob = ODEProblem(closed_loop2, Pair[], (0., 20.), Pair[closed_loop0.pid.kp => 1, closed_loop0.pid.ki => 1.0, closed_loop0.pid.kd => 20, lpf.Tf=>0.1])
 sol = solve(prob, Rosenbrock23())
@@ -282,8 +275,11 @@ INTERFACE NOTE
 ```
 
 ```julia
-using ControlSystemsMTK, RobustAndOptimalControl, ControlSystems
-G = named_ss(model, numeric=true) # This function returns an object with A,B,C,D matrices
+using RobustAndOptimalControl, ControlSystems
+using JuliaSimControls
+G = JuliaSimControls.linearize(model, model.u, model.y)
+# using ControlSystemsMTK
+# G = named_ss(model, numeric=true) # This function returns an object with A,B,C,D matrices
 bodeplot(G)
 ```
 
@@ -294,8 +290,8 @@ With such a linearized system at hand, we may use any and all of the classical c
 Using [RobustAndOptimalControl.jl](https://github.com/JuliaControl/RobustAndOptimalControl.jl) we may design a model-based LQG controller for the plant `G`, to do this, we must specify the cost matrices for the LQR control problem and the covariance matrices for the dynamics and measurement noise.
 ```julia
 using ControlSystems, RobustAndOptimalControl
-G = ssrand(1, 1, 4, proper=true) # a random system for now
-Q1 = I(G.nx) # state penalty
+# G = ControlSystems.DemoSystems.resonant()*tf(1,[1,0]) # a random system for now
+Q1 = 10I(G.nx) # state penalty
 Q2 = I(G.nu) # control penalty
 R1 = I(G.nx) # state noise covariance
 R2 = I(G.ny) # measurement noise covariance
@@ -319,6 +315,9 @@ NOTE
 ```
 
 ## Discretization
+
+Note: MTK has a lot of bugs for discrete systems so this section is future work.
+
 `c2d` or simple `exp` followed by creation of a `DiscreteSystem`.
 
 For now, we'll design the discrete-time PID controller using ControlSystems:
